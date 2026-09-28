@@ -1,5 +1,5 @@
-// Face scan indicator at the top middle of the screen, in Liquid Glass: a capsule grows out
-// of the notch, shows an animated face while scanning, then a check mark or a shake.
+// Face scan indicator at the top middle of the screen, in Liquid Glass: a small panel grows
+// out of the notch, shows an animated face while scanning, then a check mark or a shake.
 //
 // Runs as its own small app (no permissions needed), started by the lock-screen helper.
 // Everything drives it with Darwin notifications:
@@ -16,6 +16,9 @@ import notify
 /// a sweeping scan beam, and a ring + check mark for success.
 final class FaceGlyphView: NSView {
     private let side: CGFloat = 96
+    private let scale: CGFloat
+    /// Holds every drawn layer; scaled as a whole so the face can be drawn at any size.
+    private let canvas = CALayer()
     private let shimmerHost = CALayer()
     private let shimmer = CAGradientLayer()
     private let brackets = CAShapeLayer()
@@ -25,7 +28,8 @@ final class FaceGlyphView: NSView {
     private let ring = CAShapeLayer()
     private let check = CAShapeLayer()
 
-    override init(frame: NSRect) {
+    init(frame: NSRect, scale: CGFloat = 1) {
+        self.scale = scale
         super.init(frame: frame)
         wantsLayer = true
         layer?.masksToBounds = false
@@ -84,7 +88,12 @@ final class FaceGlyphView: NSView {
     }
 
     private func build() {
-        guard let root = layer else { return }
+        guard let host = layer else { return }
+        canvas.bounds = bounds
+        canvas.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        canvas.transform = CATransform3DMakeScale(scale, scale, 1)
+        host.addSublayer(canvas)
+        let root = canvas
         let white = NSColor.white
 
         // Brackets: a rainbow conic gradient seen through a bracket-shaped mask. The gradient
@@ -196,10 +205,10 @@ final class FaceGlyphView: NSView {
         draw(check, duration: 0.26, delay: 0.3)
 
         let pop = CAKeyframeAnimation(keyPath: "transform.scale")
-        pop.values = [0.9, 1.08, 1.0]
+        pop.values = [0.9 * scale, 1.12 * scale, scale]
         pop.keyTimes = [0, 0.6, 1]
         pop.duration = 0.45
-        layer?.add(pop, forKey: "pop")
+        canvas.add(pop, forKey: "pop")
     }
 
     func showFailure() {
@@ -239,6 +248,16 @@ final class FaceGlyphView: NSView {
 
 // MARK: Overlay window
 
+/// Keeps a fixed-size card at the bottom centre while the glass panel around it resizes.
+final class BottomCenteringView: NSView {
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        for view in subviews {
+            view.setFrameOrigin(NSPoint(x: (bounds.width - view.frame.width) / 2, y: 0))
+        }
+    }
+}
+
+/// A Liquid Glass panel that grows out of the notch, shows the face, and shrinks back in.
 final class FaceOverlay {
     private var window: NSPanel?
     private var glass: NSView?
@@ -249,8 +268,8 @@ final class FaceOverlay {
     private var generation = 0
     private var celebrateUntil = Date.distantPast
     private var lastUnlockSignal = Date.distantPast
-    private let windowSize = NSSize(width: 360, height: 260)
-    private let panelSize = NSSize(width: 210, height: 196)
+    private let windowSize = NSSize(width: 300, height: 240)
+    private let cardSize = NSSize(width: 150, height: 140)
 
     private var firstName: String {
         NSFullUserName().split(separator: " ").first.map(String.init) ?? ""
@@ -274,7 +293,7 @@ final class FaceOverlay {
         glyph?.showSuccess()
         setLabel(firstName.isEmpty ? "Welcome back" : "Welcome back, \(firstName)", color: .white)
         setTint(NSColor(hex: "#0f5a3c").withAlphaComponent(0.45))
-        schedule(after: 1.3) { [weak self] in self?.collapse() }
+        schedule(after: 1.4) { [weak self] in self?.collapse() }
     }
 
     func failure(_ text: String = "Not recognised") {
@@ -324,7 +343,7 @@ final class FaceOverlay {
                 guard let self else { return }
                 self.scanning()
                 self.reportVisibility(after: 0.4, what: "shown (\(reason), waited \(String(format: "%.1f", waited)) s)")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { self.success() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self.success() }
             }
         }
         attempt()
@@ -345,25 +364,36 @@ final class FaceOverlay {
         collapse()
     }
 
-    // MARK: Building
+    // MARK: Geometry (window coordinates, y up)
 
     private var screen: NSScreen? { NSScreen.screens.first }
 
-    /// The notch rectangle in window coordinates, or a notch-sized pill at the top edge.
+    /// Height hidden behind the camera notch (0 on screens without one).
+    private var notchHeight: CGFloat {
+        guard let s = screen, s.safeAreaInsets.top > 0 else { return 0 }
+        return s.safeAreaInsets.top
+    }
+
+    /// The notch rectangle, or a notch-sized pill at the top edge.
     private var notchFrame: NSRect {
         var width: CGFloat = 180
         if let s = screen, s.safeAreaInsets.top > 0,
            let left = s.auxiliaryTopLeftArea, let right = s.auxiliaryTopRightArea {
             width = s.frame.width - left.width - right.width
         }
-        let height = max(screen?.safeAreaInsets.top ?? 0, 32)
+        let height = max(notchHeight, 32)
         return NSRect(x: (windowSize.width - width) / 2, y: windowSize.height - height, width: width, height: height)
     }
 
+    /// The open panel, attached to the top edge; its top part sits behind the notch, so the
+    /// card is placed below that.
     private var expandedFrame: NSRect {
-        NSRect(x: (windowSize.width - panelSize.width) / 2, y: windowSize.height - panelSize.height,
-               width: panelSize.width, height: panelSize.height)
+        let height = cardSize.height + notchHeight + 6
+        return NSRect(x: (windowSize.width - cardSize.width) / 2, y: windowSize.height - height,
+                      width: cardSize.width, height: height)
     }
+
+    // MARK: Building
 
     private func prepare() {
         pending?.cancel()
@@ -377,6 +407,8 @@ final class FaceOverlay {
             glass?.frame = notchFrame
             setCorner(notchFrame.height / 2)
             glass?.alphaValue = 0
+            glyph?.alphaValue = 0  // fades in once the panel has opened
+            label?.alphaValue = 0
         }
         // Always re-assert: after sleep or the lock screen, macOS can report the window as
         // visible while no longer drawing it.
@@ -396,24 +428,23 @@ final class FaceOverlay {
         panel.level = .screenSaver
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
 
-        let root = NSView(frame: NSRect(origin: .zero, size: windowSize))
-        root.wantsLayer = true
-
-        let content = NSView(frame: NSRect(origin: .zero, size: panelSize))
-        let face = FaceGlyphView(frame: NSRect(x: (panelSize.width - 130) / 2, y: 44, width: 130, height: 130))
+        let card = NSView(frame: NSRect(origin: .zero, size: cardSize))
+        let face = FaceGlyphView(frame: NSRect(x: 20, y: 28, width: 110, height: 110), scale: 0.62)
         let text = NSTextField(labelWithString: "")
-        text.font = .systemFont(ofSize: 14, weight: .semibold)
+        text.font = .systemFont(ofSize: 11.5, weight: .semibold)
         text.alignment = .center
-        text.frame = NSRect(x: 8, y: 16, width: panelSize.width - 16, height: 20)
-        content.addSubview(face)
-        content.addSubview(text)
-        content.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin]
+        text.lineBreakMode = .byTruncatingTail
+        text.frame = NSRect(x: 4, y: 12, width: cardSize.width - 8, height: 16)
+        card.addSubview(face)
+        card.addSubview(text)
+        let holder = BottomCenteringView(frame: NSRect(origin: .zero, size: cardSize))
+        holder.addSubview(card)
 
         let glassView: NSView
         if #available(macOS 26.0, *) {
             let g = NSGlassEffectView(frame: notchFrame)
             g.style = .regular
-            g.contentView = content
+            g.contentView = holder
             glassView = g
         } else {
             let v = NSVisualEffectView(frame: notchFrame)
@@ -422,9 +453,13 @@ final class FaceOverlay {
             v.blendingMode = .behindWindow
             v.wantsLayer = true
             v.layer?.masksToBounds = true
-            v.addSubview(content)
+            holder.frame = v.bounds
+            holder.autoresizingMask = [.width, .height]
+            v.addSubview(holder)
             glassView = v
         }
+        let root = NSView(frame: NSRect(origin: .zero, size: windowSize))
+        root.wantsLayer = true
         root.addSubview(glassView)
         panel.contentView = root
 
@@ -439,22 +474,22 @@ final class FaceOverlay {
     private func expand() {
         guard let glass else { return }
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.5
+            ctx.duration = 0.45
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 1.3, 0.35, 1)  // springy overshoot
             glass.animator().frame = expandedFrame
             glass.animator().alphaValue = 1
         }
-        setCorner(46)
-        contentFade(to: 1, duration: 0.35, delay: 0.12)
+        setCorner(36)
+        contentFade(to: 1, duration: 0.25, delay: 0.2)
     }
 
     private func collapse() {
         pending?.cancel()
         guard let glass, let window else { return }
         let shownAs = generation
-        contentFade(to: 0, duration: 0.15, delay: 0)
+        contentFade(to: 0, duration: 0.12, delay: 0)
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.38
+            ctx.duration = 0.35
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.5, 0, 0.2, 1)
             glass.animator().frame = notchFrame
             glass.animator().alphaValue = 0
@@ -462,6 +497,14 @@ final class FaceOverlay {
             if self?.generation == shownAs { window.orderOut(nil) }
         })
         setCorner(notchFrame.height / 2)
+    }
+
+    private func shake() {
+        guard let layer = glass?.layer else { return }
+        let a = CAKeyframeAnimation(keyPath: "transform.translation.x")
+        a.values = [0, -12, 10, -7, 4, 0]
+        a.duration = 0.45
+        layer.add(a, forKey: "shake")
     }
 
     private func contentFade(to value: CGFloat, duration: Double, delay: Double) {
@@ -472,14 +515,6 @@ final class FaceOverlay {
                 views.forEach { $0.animator().alphaValue = value }
             }
         }
-    }
-
-    private func shake() {
-        guard let layer = glass?.layer else { return }
-        let a = CAKeyframeAnimation(keyPath: "transform.translation.x")
-        a.values = [0, -14, 12, -9, 6, -3, 0]
-        a.duration = 0.5
-        layer.add(a, forKey: "shake")
     }
 
     private func setCorner(_ radius: CGFloat) {
