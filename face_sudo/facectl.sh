@@ -60,6 +60,7 @@ sync_data() {
     install -o root -g wheel -m 644 "$face" "$DEST/owner_embeddings.npy"
     "$DEST/venv/bin/python" -I -c "import json,sys; json.load(open(sys.argv[1]))" "$HERE/config.json"
     install -o root -g wheel -m 644 "$HERE/config.json" "$DEST/config.json"
+    install -o root -g wheel -m 644 "$HERE/check_face.py" "$DEST/check_face.py"
 }
 
 do_install() {

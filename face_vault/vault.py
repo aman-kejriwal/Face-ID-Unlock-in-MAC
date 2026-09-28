@@ -40,6 +40,15 @@ DEFAULT_CONFIG = {
 GREEN, RED, YELLOW, WHITE = (0, 200, 0), (0, 0, 255), (0, 200, 255), (255, 255, 255)
 
 
+def overlay(state):
+    """Drives the on-screen scan animation shown by the lock-screen helper, if it is running."""
+    try:
+        import ctypes
+        ctypes.CDLL("/usr/lib/libSystem.B.dylib").notify_post(f"local.faceidunlock.overlay.{state}".encode())
+    except OSError:
+        pass
+
+
 def load_config():
     if not CONFIG_FILE.exists():
         CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n")
@@ -184,9 +193,12 @@ def verify(config):
 
 
 def unlock(config, dry_run):
+    overlay("scan")
     if not verify(config):
+        overlay("fail")
         print("Access denied.")
         sys.exit(1)
+    overlay("success")
     print("Access granted.")
     if dry_run:
         return

@@ -6,6 +6,7 @@
 //   helper clear-password   delete it from the Keychain
 //   helper status           print {"password_saved": bool}
 import AVFoundation
+import notify
 import AppKit
 import ApplicationServices
 import OpenDirectory
@@ -317,9 +318,28 @@ final class Agent {
     /// (the app restarts it after saving a new password). Prevents repeated wrong attempts.
     private var suspended = false
     private let faceServer = FaceServer()
+    /// The Liquid Glass animation runs as its own app (no permissions of its own), so it can
+    /// be changed without rebuilding this helper and re-granting its permissions.
+    private var overlayApp: Process?
+
+    private func startOverlayApp() {
+        let process = Process()
+        process.executableURL = project.appendingPathComponent(
+            "face_unlock/Face ID Unlock Overlay.app/Contents/MacOS/FaceIDUnlockOverlay")
+        process.terminationHandler = { _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { self.startOverlayApp() }
+        }
+        do {
+            try process.run()
+            overlayApp = process
+        } catch {
+            log("could not start the overlay app: \(error)")
+        }
+    }
 
     func start() {
         faceServer.start()
+        startOverlayApp()
         // Ask for every permission now, while the screen is unlocked and prompts can be answered.
         // Reading the project triggers macOS's "access files in your Documents folder" prompt.
         _ = try? Data(contentsOf: configURL)
@@ -332,6 +352,11 @@ final class Agent {
         for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.didWakeNotification] {
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.onWake() }
         }
+    }
+
+    /// Asks the overlay app to play the "unlocked" moment; it waits for the desktop itself.
+    private func celebrateAfterUnlock() {
+        notify_post("local.faceidunlock.overlay.unlocked")
     }
 
     private func onWake() {
@@ -384,9 +409,15 @@ final class Agent {
         if shiftPressed == nil { faceServer.cancel() }
         faceDone.wait()
 
-        guard !typedBeforeShift else { return writeStatus("You started typing - left the password to you") }
-        guard let shiftPressed else { return writeStatus("Display was not ready - left the password to you") }
-        guard matched else { return writeStatus("Face not recognised") }
+        guard !typedBeforeShift else {
+            return writeStatus("You started typing - left the password to you")
+        }
+        guard let shiftPressed else {
+            return writeStatus("Display was not ready - left the password to you")
+        }
+        guard matched else {
+            return writeStatus("Face not recognised")
+        }
         guard !userInputSince(shiftPressed.addingTimeInterval(0.2)) else {
             return writeStatus("You started typing - left the password to you")
         }
@@ -394,6 +425,7 @@ final class Agent {
         let typedAt = Date()
         let seconds = String(format: "%.1f", Date().timeIntervalSince(wakeTime))
         if waitForUnlock(within: 1.5) {
+            celebrateAfterUnlock()
             return writeStatus("Unlocked with your face in \(seconds) s")
         }
 
@@ -408,6 +440,7 @@ final class Agent {
             return writeStatus("You started typing - left the password to you")
         }
         if waitForUnlock(within: 3) {
+            celebrateAfterUnlock()
             writeStatus("Unlocked with your face in \(String(format: "%.1f", Date().timeIntervalSince(wakeTime))) s (second try)")
         } else {
             suspended = true
@@ -418,27 +451,32 @@ final class Agent {
 
 // MARK: Entry point
 
-let command = CommandLine.arguments.dropFirst().first ?? "run"
-switch command {
-case "run":
-    let app = NSApplication.shared
-    app.setActivationPolicy(.prohibited)
-    let agent = Agent()
-    agent.start()
-    app.run()
-case "set-password":
-    guard let password = readLine(strippingNewline: true), !password.isEmpty else {
-        print("No password given"); exit(2)
+@main
+enum HelperMain {
+    static func main() {
+        let command = CommandLine.arguments.dropFirst().first ?? "run"
+        switch command {
+        case "run":
+            let app = NSApplication.shared
+            app.setActivationPolicy(.prohibited)  // background only; the overlay app draws
+            let agent = Agent()
+            agent.start()
+            app.run()
+        case "set-password":
+            guard let password = readLine(strippingNewline: true), !password.isEmpty else {
+                print("No password given"); exit(2)
+            }
+            guard isCorrectPassword(password) else { print("That is not the password for \(account)."); exit(3) }
+            guard savePassword(password) else { print("Could not save to the Keychain."); exit(4) }
+            print("Password verified and saved to your Keychain.")
+        case "clear-password":
+            SecItemDelete(keychainQuery as CFDictionary)
+            print("Password removed from your Keychain.")
+        case "status":
+            print("{\"password_saved\": \(passwordSaved())}")
+        default:
+            print("Usage: helper [run | set-password | clear-password | status]")
+            exit(1)
+        }
     }
-    guard isCorrectPassword(password) else { print("That is not the password for \(account)."); exit(3) }
-    guard savePassword(password) else { print("Could not save to the Keychain."); exit(4) }
-    print("Password verified and saved to your Keychain.")
-case "clear-password":
-    SecItemDelete(keychainQuery as CFDictionary)
-    print("Password removed from your Keychain.")
-case "status":
-    print("{\"password_saved\": \(passwordSaved())}")
-default:
-    print("Usage: helper [run | set-password | clear-password | status]")
-    exit(1)
 }

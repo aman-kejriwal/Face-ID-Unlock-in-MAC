@@ -753,6 +753,9 @@ class MainWindow(QMainWindow):
 
     def start_camera(self, mode, append=False):
         self.appending = append
+        self.overlay_pending = mode == "unlock"
+        if self.overlay_pending:
+            vault.overlay("scan")
         self.worker = CameraWorker(mode, dict(self.vault_tab.config))
         self.worker.frame.connect(self.show_frame)
         self.worker.status.connect(self.set_status)
@@ -768,6 +771,9 @@ class MainWindow(QMainWindow):
             self.worker.stop()
 
     def camera_finished(self):
+        if getattr(self, "overlay_pending", False):
+            vault.overlay("hide")  # stopped before a result
+            self.overlay_pending = False
         self.worker = None
         self.preview.setPixmap(QPixmap())
         self.preview.setText("Camera off")
@@ -802,6 +808,8 @@ class MainWindow(QMainWindow):
                 self.sudo_tab.run_admin("sync", USER)
 
     def unlock_finished(self, ok):
+        self.overlay_pending = False
+        vault.overlay("success" if ok else "fail")
         if not ok:
             self.set_status("Access denied.", RED)
             return

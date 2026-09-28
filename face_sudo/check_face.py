@@ -14,6 +14,15 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 
+def overlay(state):
+    """Drives the on-screen scan animation shown by the lock-screen helper, if it is running."""
+    try:
+        import ctypes
+        ctypes.CDLL("/usr/lib/libSystem.B.dylib").notify_post(f"local.faceidunlock.overlay.{state}".encode())
+    except OSError:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=HERE / "config.json", type=Path)
@@ -42,6 +51,8 @@ def main():
     cam = cv2.VideoCapture(config["camera_index"])
     if not cam.isOpened():
         return 2
+    overlay("scan")
+    matched = False
     try:
         streak = 0
         while time.time() < deadline:
@@ -61,10 +72,12 @@ def main():
             print(f"similarity={score:.3f}", file=sys.stderr)
             streak = streak + 1 if score >= config["match_threshold"] else 0
             if streak >= config["frames_required"]:
+                matched = True
                 return 0
         return 1
     finally:
         cam.release()
+        overlay("success" if matched else "fail")
 
 
 if __name__ == "__main__":

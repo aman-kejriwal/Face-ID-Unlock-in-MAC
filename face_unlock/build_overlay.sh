@@ -1,16 +1,17 @@
 #!/bin/bash
-# Builds "Face ID Unlock Helper.app" next to this script.
-# Note: the helper is signed locally, without a developer certificate, so each rebuild
-# counts as a new app to macOS: Accessibility and Camera must be allowed again and the
-# password saved again.
+# Builds "Face ID Unlock Overlay.app" (the Liquid Glass scan animation) next to this script.
+# It needs no permissions, so rebuilding it never affects the helper's Accessibility or
+# Keychain access. The helper starts it; after a rebuild, restart the helper to pick it up.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-APP="$HERE/Face ID Unlock Helper.app"
+APP="$HERE/Face ID Unlock Overlay.app"
 ICON="$(dirname "$HERE")/face_app/AppIcon.png"
 
+pkill -f "Face ID Unlock Overlay.app/Contents/MacOS/FaceIDUnlockOverlay" 2>/dev/null || true
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-swiftc -O -parse-as-library -target arm64-apple-macos13.0 -o "$APP/Contents/MacOS/FaceIDUnlockHelper" "$HERE/helper.swift"
+swiftc -O -parse-as-library -target arm64-apple-macos13.0 -o "$APP/Contents/MacOS/FaceIDUnlockOverlay" \
+    "$HERE/overlay_main.swift" "$HERE/overlay.swift"
 
 if [[ -f "$ICON" ]]; then
     ICONSET=$(mktemp -d)/AppIcon.iconset
@@ -27,9 +28,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Face ID Unlock Helper</string>
-    <key>CFBundleIdentifier</key><string>local.faceidunlock.helper</string>
-    <key>CFBundleExecutable</key><string>FaceIDUnlockHelper</string>
+    <key>CFBundleName</key><string>Face ID Unlock Overlay</string>
+    <key>CFBundleIdentifier</key><string>local.faceidunlock.overlay</string>
+    <key>CFBundleExecutable</key><string>FaceIDUnlockOverlay</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
@@ -37,10 +38,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
-    <key>NSCameraUsageDescription</key><string>Face ID Unlock Helper checks your face when you open the lid.</string>
 </dict>
 </plist>
 PLIST
 
-codesign --force --sign - --identifier local.faceidunlock.helper "$APP"
+codesign --force --sign - --identifier local.faceidunlock.overlay "$APP"
 echo "Built: $APP"
