@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/local/lib/face-sudo/venv/bin/python -I /usr/local/lib/face-sudo/check_face.py

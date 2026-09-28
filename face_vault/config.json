@@ -1,0 +1,11 @@
+{
+  "match_threshold": 0.75,
+  "frames_required": 3,
+  "unlock_timeout_seconds": 8,
+  "enroll_samples": 10,
+  "camera_index": 0,
+  "liveness": true,
+  "open_on_unlock": [
+    "/Users/amankumar/Documents/Active-Projects/Projects/Face ID Unlock/face_vault/secret"
+  ]
+}

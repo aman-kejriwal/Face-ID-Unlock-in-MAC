@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "match_threshold": 0.6,
+  "frames_required": 3,
+  "timeout_seconds": 7,
+  "camera_index": 0,
+  "liveness": true
+}

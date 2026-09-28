@@ -1,0 +1,57 @@
+# macOS and editor-local files
+.DS_Store
+.jetro/
+.idea/
+.vscode/
+
+# Python environments, bytecode, and tooling output
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Biometric data and private vault contents
+face_vault/data/
+face_vault/secret/*
+!face_vault/secret/README.txt
+**/owner_embeddings.npy
+*.npy
+
+# Third-party InsightFace checkout (clone it separately, see README.md)
+insightface/
+
+# Downloaded ML models and runtime data
+*.onnx
+*.mlmodel
+*.mlpackage/
+.insightface/
+face_vault/.models/
+
+# Generated application bundles and build output
+*.app/
+build/
+dist/
+*.dSYM/
+
+# Logs and temporary files
+*.log
+*.tmp
+tmp/
