@@ -344,19 +344,25 @@ class SudoTab(QWidget):
         self.frames = spin(1, 10, cfg.get("frames_required", 3))
         # pam_face.so kills the check after 9 s, so keep this below that.
         self.timeout = spin(3, 8, cfg.get("timeout_seconds", 6))
+        self.blink = QCheckBox("Require a blink (a photo can't blink)")
+        self.blink.setChecked(cfg.get("require_blink", False))
+        self.live_threshold = spin(0.50, 0.99, cfg.get("liveness_threshold", 0.9), 0.01, decimals=2)
         self.apply = QPushButton("Apply settings to sudo")
         self.apply.clicked.connect(self.apply_settings)
         form = QFormLayout()
         form.addRow(self.liveness)
+        form.addRow("Photo-check strictness", self.live_threshold)
+        form.addRow(self.blink)
         form.addRow("Match threshold", self.threshold)
         form.addRow("Matching frames needed", self.frames)
         form.addRow("Give up after (seconds)", self.timeout)
         form.addRow(self.apply)
         settings_box = QGroupBox("sudo settings")
         settings_box.setLayout(form)
-        for w in (self.threshold, self.frames, self.timeout):
+        for w in (self.threshold, self.frames, self.timeout, self.live_threshold):
             w.valueChanged.connect(self.refresh)
         self.liveness.toggled.connect(self.refresh)
+        self.blink.toggled.connect(self.refresh)
 
         self.remove = QPushButton("Remove completely")
         self.remove.clicked.connect(self.on_remove)
@@ -388,6 +394,8 @@ class SudoTab(QWidget):
             "timeout_seconds": self.timeout.value(),
             "camera_index": 0,
             "liveness": self.liveness.isChecked(),
+            "liveness_threshold": round(self.live_threshold.value(), 2),
+            "require_blink": self.blink.isChecked(),
         }
 
     def refresh(self):
@@ -531,16 +539,22 @@ class LockScreenTab(QWidget):
         self.threshold = spin(0.30, 0.95, c.get("match_threshold", 0.6), 0.05, decimals=2)
         self.frames = spin(1, 10, c.get("frames_required", 3))
         self.timeout = spin(3, 15, c.get("timeout_seconds", 8))
+        self.blink = QCheckBox("Require a blink (a photo can't blink) - look at the camera and blink once")
+        self.blink.setChecked(c.get("require_blink", True))
+        self.live_threshold = spin(0.50, 0.99, c.get("liveness_threshold", 0.9), 0.01, decimals=2)
         form = QFormLayout()
         form.addRow(self.liveness)
+        form.addRow("Photo-check strictness", self.live_threshold)
+        form.addRow(self.blink)
         form.addRow("Match threshold", self.threshold)
         form.addRow("Matching frames needed", self.frames)
         form.addRow("Give up after (seconds)", self.timeout)
         settings_box = QGroupBox("Recognition")
         settings_box.setLayout(form)
-        for w in (self.threshold, self.frames, self.timeout):
+        for w in (self.threshold, self.frames, self.timeout, self.live_threshold):
             w.valueChanged.connect(self.save_config)
         self.liveness.toggled.connect(self.save_config)
+        self.blink.toggled.connect(self.save_config)
 
         warning = QLabel(
             "While this is on, anyone who can fool the camera can unlock your Mac after sleep. "
@@ -567,6 +581,8 @@ class LockScreenTab(QWidget):
             match_threshold=round(self.threshold.value(), 2),
             frames_required=self.frames.value(),
             timeout_seconds=self.timeout.value(),
+            require_blink=self.blink.isChecked(),
+            liveness_threshold=round(self.live_threshold.value(), 2),
         )
         write_json(UNLOCK_CONFIG, self.config)
 

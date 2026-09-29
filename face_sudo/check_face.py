@@ -3,6 +3,10 @@
 Exit code 0 = the enrolled owner was seen, anything else = not verified.
 For sudo it runs as root with its files next to it, all root-owned (see facectl.sh).
 The lock-screen helper passes --config/--faces/--models to use the user's own files.
+
+LiveFaceGate (also used by face_unlock/face_server.py) decides whether the owner is really
+in front of the camera: the face must match, pass the liveness model on every open-eye
+frame, and - if "require_blink" is set - blink, which a photo cannot do.
 """
 
 import argparse
@@ -13,6 +17,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
+# iBUG 68-point landmark indices for each eye, in eye-aspect-ratio order (p1..p6).
+LEFT_EYE = [36, 37, 38, 39, 40, 41]
+RIGHT_EYE = [42, 43, 44, 45, 46, 47]
+
 
 def overlay(state):
     """Drives the on-screen scan animation shown by the lock-screen helper, if it is running."""
@@ -21,6 +29,145 @@ def overlay(state):
         ctypes.CDLL("/usr/lib/libSystem.B.dylib").notify_post(f"local.faceidunlock.overlay.{state}".encode())
     except OSError:
         pass
+
+
+def eye_openness(face):
+    """Eye aspect ratio averaged over both eyes (~0.3 open, <0.2 closed); None if unavailable."""
+    import numpy as np
+
+    marks = getattr(face, "landmark_3d_68", None)
+    if marks is None:
+        return None
+    pts = marks[:, :2]
+
+    def ratio(idx):
+        p = pts[idx]
+        vertical = np.linalg.norm(p[1] - p[5]) + np.linalg.norm(p[2] - p[4])
+        return vertical / (2 * np.linalg.norm(p[0] - p[3]) + 1e-6)
+
+    return (ratio(LEFT_EYE) + ratio(RIGHT_EYE)) / 2
+
+
+class LiveFaceGate:
+    """Feed it every frame's faces; it says when the owner is verified as really present.
+
+    Forgiving of noise, strict about spoofs: frames that are merely imperfect (a borderline
+    match, no face, a second face, liveness unsure) are skipped without losing progress, but
+    a frame the liveness model calls fake wipes everything, and progress only counts on
+    frames that match the owner. A photo cannot pass because it cannot blink.
+    """
+
+    FAKE_BELOW = 0.5     # liveness score that counts as a detected spoof
+    GONE_AFTER = 1.0     # seconds without a matching frame before starting over
+    BLINK_WITHIN = 1.2   # seconds from eyes closed to eyes open again
+
+    def __init__(self, owner, config):
+        self.owner = owner
+        self.threshold = config.get("match_threshold", 0.6)
+        self.needed = config.get("frames_required", 3)
+        self.need_live = config.get("liveness", True)
+        self.live_threshold = config.get("liveness_threshold", 0.9)
+        self.need_blink = config.get("require_blink", False)
+        self.stats = {"frames": 0, "no_face": 0, "several": 0, "low": 0, "unsure": 0, "fake": 0}
+        self.best = 0.0
+        self.live_scores = []
+        self.last_match = None
+        self.reset()
+
+    def reset(self):
+        self.matches = 0
+        self.live_frames = 0
+        self.open_ref = 0.0
+        self.closed_at = None
+        self.blinked = False
+
+    def update(self, faces, adjusted=False):
+        """Returns True once verified.
+
+        `adjusted` marks a frame that was brightened for detection: it can count as a face
+        match and a blink, but never as a liveness pass (brightening changes what the
+        liveness model sees)."""
+        import numpy as np
+
+        now = time.time()
+        self.stats["frames"] += 1
+        if self.last_match is not None and now - self.last_match > self.GONE_AFTER:
+            self.reset()  # the face has been away too long: start over
+            self.last_match = None
+
+        if not faces or faces[0].normed_embedding is None:
+            self.stats["no_face"] += 1
+            return False
+        if len(faces) != 1:
+            self.stats["several"] += 1
+            return False
+        face = faces[0]
+        score = float(np.max(self.owner @ face.normed_embedding))
+        self.best = max(self.best, score)
+        if score < self.threshold:
+            self.stats["low"] += 1
+            return False
+        self.last_match = now
+        self.matches += 1
+
+        # Blink: eyes clearly closed relative to the most open they have been, then open again
+        # soon after - all on frames that match the owner.
+        ear = eye_openness(face)
+        eyes_open = True
+        if ear is not None:
+            self.open_ref = max(self.open_ref, ear)
+            if self.open_ref > 0.18 and ear < 0.72 * self.open_ref:
+                self.closed_at = now
+                eyes_open = False
+            elif self.closed_at is not None and ear > 0.85 * self.open_ref:
+                if now - self.closed_at <= self.BLINK_WITHIN:
+                    self.blinked = True
+                self.closed_at = None
+
+        # Liveness, judged on open-eye, unbrightened frames.
+        if self.need_live and eyes_open and not adjusted:
+            result = getattr(face, "liveness", None)
+            live_score = getattr(result, "live_score", None) if result is not None else None
+            if live_score is not None:
+                self.live_scores.append(live_score)
+            if live_score is not None and live_score < self.FAKE_BELOW:
+                self.stats["fake"] += 1
+                self.reset()  # a detected spoof: throw away all progress
+                return False
+            if live_score is None or live_score < self.live_threshold:
+                self.stats["unsure"] += 1
+            else:
+                self.live_frames += 1
+
+        enough_live = not self.need_live or self.live_frames >= self.needed
+        blink_ok = not self.need_blink or self.blinked
+        return self.matches >= self.needed and enough_live and blink_ok
+
+    def summary(self):
+        s = self.stats
+        live = (f"live score min {min(self.live_scores):.2f} max {max(self.live_scores):.2f}"
+                if self.live_scores else "live score n/a")
+        return (f"frames {s['frames']}: no face {s['no_face']}, several faces {s['several']}, "
+                f"low score {s['low']}, liveness unsure {s['unsure']}, fake {s['fake']}, "
+                f"best {self.best:.2f}, {live}, blink {'yes' if self.blinked else 'no'}, "
+                f"eye openness max {self.open_ref:.2f}")
+
+
+def build_app(models_root, config, providers=None):
+    from insightface.app import FaceAnalysis
+
+    modules = ["detection", "recognition"]
+    if config.get("require_blink"):
+        modules.append("landmark_3d_68")  # eye landmarks for blink detection
+    kwargs = {"providers": providers} if providers else {}
+    return FaceAnalysis(
+        name="buffalo_l",
+        root=str(models_root),
+        allowed_modules=modules,
+        addons=["liveness"] if config.get("liveness", True) else [],
+        liveness_mode="observe",  # LiveFaceGate applies its own, stricter threshold
+        **kwargs,
+    )
 
 
 def main():
@@ -35,18 +182,11 @@ def main():
 
     import cv2
     import numpy as np
-    from insightface.app import FaceAnalysis
 
-    owner = np.load(args.faces)
-    app = FaceAnalysis(
-        name="buffalo_l",
-        root=str(args.models),
-        allowed_modules=["detection", "recognition"],
-        addons=["liveness"] if config["liveness"] else [],
-        # CPU starts in ~1s; CoreML takes ~8s to load, too slow for a sudo prompt.
-        providers=["CPUExecutionProvider"],
-    )
+    # CPU starts in ~1s; CoreML takes ~8s to load, too slow for a sudo prompt.
+    app = build_app(args.models, config, providers=["CPUExecutionProvider"])
     app.prepare(ctx_id=-1, det_size=(640, 640))
+    gate = LiveFaceGate(np.load(args.faces), config)
 
     cam = cv2.VideoCapture(config["camera_index"])
     if not cam.isOpened():
@@ -54,30 +194,18 @@ def main():
     overlay("scan")
     matched = False
     try:
-        streak = 0
         while time.time() < deadline:
             ok, frame = cam.read()
             if not ok:
                 continue
-            faces = app.get(frame)
-            if len(faces) != 1:
-                streak = 0
-                continue
-            face = faces[0]
-            liveness = getattr(face, "liveness", None)
-            if (liveness is not None and not liveness.is_live) or face.normed_embedding is None:
-                streak = 0
-                continue
-            score = float(np.max(owner @ face.normed_embedding))
-            print(f"similarity={score:.3f}", file=sys.stderr)
-            streak = streak + 1 if score >= config["match_threshold"] else 0
-            if streak >= config["frames_required"]:
+            if gate.update(app.get(frame)):
                 matched = True
                 return 0
         return 1
     finally:
         cam.release()
         overlay("success" if matched else "fail")
+        print(gate.summary(), file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 {
-  "match_threshold": 0.75,
+  "match_threshold": 0.65,
   "frames_required": 3,
   "unlock_timeout_seconds": 8,
   "enroll_samples": 10,
