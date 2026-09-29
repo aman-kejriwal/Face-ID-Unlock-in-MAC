@@ -5,14 +5,16 @@ For sudo it runs as root with its files next to it, all root-owned (see facectl.
 The lock-screen helper passes --config/--faces/--models to use the user's own files.
 
 LiveFaceGate (also used by face_unlock/face_server.py) decides whether the owner is really
-in front of the camera: the face must match, pass the liveness model on every open-eye
-frame, and - if "require_blink" is set - blink, which a photo cannot do.
+in front of the camera: the face must match and pass the liveness model, and - if
+"require_blink" is set - prove it is not a flat picture, either by blinking or (with
+"depth_check") by the 3D parallax of natural head movement, which a photo cannot show.
 """
 
 import argparse
 import json
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -29,6 +31,11 @@ def overlay(state):
         ctypes.CDLL("/usr/lib/libSystem.B.dylib").notify_post(f"local.faceidunlock.overlay.{state}".encode())
     except OSError:
         pass
+
+
+def landmarks_2d(face):
+    marks = getattr(face, "landmark_3d_68", None)
+    return None if marks is None else marks[:, :2].astype("float32")
 
 
 def eye_openness(face):
@@ -60,6 +67,9 @@ class LiveFaceGate:
     FAKE_BELOW = 0.5     # liveness score that counts as a detected spoof
     GONE_AFTER = 1.0     # seconds without a matching frame before starting over
     BLINK_WITHIN = 1.2   # seconds from eyes closed to eyes open again
+    DEPTH_WINDOW = 1.0   # seconds of landmark history compared for parallax
+    DEPTH_MIN_GAP = 0.15  # compare frames at least this far apart
+    MIN_MOTION = 0.015   # head must move at least this much (fraction of eye distance)
 
     def __init__(self, owner, config):
         self.owner = owner
@@ -68,6 +78,11 @@ class LiveFaceGate:
         self.need_live = config.get("liveness", True)
         self.live_threshold = config.get("liveness_threshold", 0.9)
         self.need_blink = config.get("require_blink", False)
+        self.depth_check = config.get("depth_check", False)
+        self.depth_threshold = config.get("depth_threshold", 0.03)
+        self.max_parallax = 0.0
+        self.max_motion = 0.0
+        self.proved_by = None
         self.stats = {"frames": 0, "no_face": 0, "several": 0, "low": 0, "unsure": 0, "fake": 0}
         self.best = 0.0
         self.live_scores = []
@@ -80,6 +95,8 @@ class LiveFaceGate:
         self.open_ref = 0.0
         self.closed_at = None
         self.blinked = False
+        self.depth_ok = False
+        self.track = deque()
 
     def update(self, faces, adjusted=False):
         """Returns True once verified.
@@ -124,6 +141,9 @@ class LiveFaceGate:
                     self.blinked = True
                 self.closed_at = None
 
+        if self.depth_check:
+            self._check_depth(face, now)
+
         # Liveness, judged on open-eye, unbrightened frames.
         if self.need_live and eyes_open and not adjusted:
             result = getattr(face, "liveness", None)
@@ -140,8 +160,45 @@ class LiveFaceGate:
                 self.live_frames += 1
 
         enough_live = not self.need_live or self.live_frames >= self.needed
-        blink_ok = not self.need_blink or self.blinked
-        return self.matches >= self.needed and enough_live and blink_ok
+        not_flat = not self.need_blink or self.blinked or self.depth_ok
+        verified = self.matches >= self.needed and enough_live and not_flat
+        if verified and self.need_blink:
+            self.proved_by = "3D motion" if self.depth_ok else "blink"
+        return verified
+
+    def _check_depth(self, face, now):
+        """Sets depth_ok once the landmarks move in a way no flat picture can.
+
+        Every view of a flat photo or screen - however it is tilted or moved - is an exact
+        homography of any other view. A real face is 3D: as the head turns even slightly,
+        the nose shifts against the cheeks and jaw, and no homography fits. The leftover
+        error, relative to the distance between the eyes, is the parallax."""
+        import cv2
+        import numpy as np
+
+        pts = landmarks_2d(face)
+        if pts is None:
+            return
+        eye_gap = float(np.linalg.norm(pts[36:42].mean(0) - pts[42:48].mean(0)))
+        if eye_gap < 5:
+            return
+        while self.track and now - self.track[0][0] > self.DEPTH_WINDOW:
+            self.track.popleft()
+        for then, old in self.track:
+            if now - then < self.DEPTH_MIN_GAP:
+                break
+            homography, _ = cv2.findHomography(old, pts, 0)
+            if homography is None:
+                continue
+            fitted = cv2.perspectiveTransform(old.reshape(-1, 1, 2), homography).reshape(-1, 2)
+            parallax = float(np.sqrt(((fitted - pts) ** 2).sum(1).mean())) / eye_gap
+            motion = float(np.linalg.norm(pts - old, axis=1).mean()) / eye_gap
+            self.max_motion = max(self.max_motion, motion)
+            if motion >= self.MIN_MOTION:
+                self.max_parallax = max(self.max_parallax, parallax)
+                if parallax >= self.depth_threshold:
+                    self.depth_ok = True
+        self.track.append((now, pts))
 
     def summary(self):
         s = self.stats
@@ -150,7 +207,9 @@ class LiveFaceGate:
         return (f"frames {s['frames']}: no face {s['no_face']}, several faces {s['several']}, "
                 f"low score {s['low']}, liveness unsure {s['unsure']}, fake {s['fake']}, "
                 f"best {self.best:.2f}, {live}, blink {'yes' if self.blinked else 'no'}, "
-                f"eye openness max {self.open_ref:.2f}")
+                f"eye openness max {self.open_ref:.2f}, parallax max {self.max_parallax:.3f} "
+                f"(motion max {self.max_motion:.3f}, needs {self.depth_threshold}), "
+                f"proved by {self.proved_by or '-'}")
 
 
 def build_app(models_root, config, providers=None):

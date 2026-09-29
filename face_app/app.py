@@ -542,19 +542,25 @@ class LockScreenTab(QWidget):
         self.blink = QCheckBox("Require a blink (a photo can't blink) - look at the camera and blink once")
         self.blink.setChecked(c.get("require_blink", True))
         self.live_threshold = spin(0.50, 0.99, c.get("liveness_threshold", 0.9), 0.01, decimals=2)
+        self.depth = QCheckBox("Or accept natural head movement (3D check) - faster than waiting to blink")
+        self.depth.setChecked(c.get("depth_check", True))
+        # A moving flat photo measured up to ~0.04; keep this well above that.
+        self.depth_threshold = spin(0.045, 0.20, c.get("depth_threshold", 0.06), 0.005, decimals=3)
         form = QFormLayout()
         form.addRow(self.liveness)
         form.addRow("Photo-check strictness", self.live_threshold)
         form.addRow(self.blink)
+        form.addRow(self.depth)
+        form.addRow("3D check threshold", self.depth_threshold)
         form.addRow("Match threshold", self.threshold)
         form.addRow("Matching frames needed", self.frames)
         form.addRow("Give up after (seconds)", self.timeout)
         settings_box = QGroupBox("Recognition")
         settings_box.setLayout(form)
-        for w in (self.threshold, self.frames, self.timeout, self.live_threshold):
+        for w in (self.threshold, self.frames, self.timeout, self.live_threshold, self.depth_threshold):
             w.valueChanged.connect(self.save_config)
-        self.liveness.toggled.connect(self.save_config)
-        self.blink.toggled.connect(self.save_config)
+        for w in (self.liveness, self.blink, self.depth):
+            w.toggled.connect(self.save_config)
 
         warning = QLabel(
             "While this is on, anyone who can fool the camera can unlock your Mac after sleep. "
@@ -583,6 +589,8 @@ class LockScreenTab(QWidget):
             timeout_seconds=self.timeout.value(),
             require_blink=self.blink.isChecked(),
             liveness_threshold=round(self.live_threshold.value(), 2),
+            depth_check=self.depth.isChecked(),
+            depth_threshold=round(self.depth_threshold.value(), 3),
         )
         write_json(UNLOCK_CONFIG, self.config)
 
